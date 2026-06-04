@@ -1,0 +1,29 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Environment variables (Never commit this!)
+.env
+
+# Logs and databases
+*.log
+agent.log
+*.sqlite3
+*.db
+
+# IDEs and tooling
+.vscode/
+.idea/
+.gemini/
+*.swp
+
+# OS generated files
+.DS_Store
+Thumbs.db
