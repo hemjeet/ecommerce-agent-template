@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, List, Dict, Any
 from cachetools import TTLCache
 import threading
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class OrderDetailsResponse(BaseModel):
         "asks for refund of a specific order, asks order status, delivery status, "
         "payment status, or item details for a specific order."
     ))
+@retry_on_db_error()
 def get_order_details(order_id: str) -> str:
     if not order_id or not order_id.strip():
         return OrderDetailsResponse(error='order_id is required').model_dump_json()

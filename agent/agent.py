@@ -185,7 +185,6 @@ class EcomAgent:
         graph.add_node('llm_call', self._llm_call, retry=RetryPolicy(
             max_attempts=3,
             retry_on=lambda e: isinstance(e, retry_exceptions)
-            and not isinstance(e, openai.AuthenticationError)
             and not (isinstance(e, openai.APIStatusError) 
             and e.status_code in (400, 401, 403, 422))
         ))

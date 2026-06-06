@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 from data import Order, SessionLocal
 from pydantic import BaseModel
 from typing import Optional
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class ApprovalResponse(BaseModel):
         "This does not process the refund."
     )
 )
+@retry_on_db_error()
 def create_refund_approval_ticket(
     order_id: str,
     customer_id: str,

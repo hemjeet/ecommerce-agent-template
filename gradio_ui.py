@@ -303,3 +303,5 @@ def create_demo(api_base: str = None):
 if __name__ == "__main__":
     demo = create_demo()
     demo.launch(server_port=7860)
+    # uvicorn app:app --reload --host 0.0.0.0 --port 8000
+

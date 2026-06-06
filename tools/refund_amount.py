@@ -3,6 +3,7 @@ from langchain_core.tools import tool
 from data import Order, SessionLocal
 from pydantic import BaseModel
 from typing import Optional
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +16,7 @@ class RefundAmountResponse(BaseModel):
     "calculate_refund_amount",
     description="Calculate refund amount for a specific order. Returns the refund amount as a number."
 )
+@retry_on_db_error()
 def calculate_refund_amount(order_id: str) -> str:
     if not order_id or not order_id.strip():
         return RefundAmountResponse(order_id="", error='order_id is required').model_dump_json()

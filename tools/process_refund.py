@@ -4,6 +4,7 @@ from langchain_core.tools import tool
 from data import Order, SessionLocal
 from pydantic import BaseModel
 from typing import Optional
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ class RefundResponse(BaseModel):
         "Do not use this for refunds above 500 unless human approval has already been granted."
     )
 )
+@retry_on_db_error()
 def process_refund(order_id: str, customer_id: str, amount: float, reason: str) -> str:
     # Input validation
     if not order_id or not order_id.strip():

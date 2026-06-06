@@ -4,6 +4,7 @@ import json
 import logging
 import sys
 import asyncio
+import time
 from contextlib import asynccontextmanager
 from concurrent.futures import ThreadPoolExecutor
 
@@ -77,15 +78,20 @@ class HealthResponse(BaseModel):
 async def lifespan(app: FastAPI):
     """Initialize heavy resources once at startup, clean up on shutdown."""
     load_dotenv()
-    logger.info("Starting up – initializing LLM, vectorstore, and agent graph…")
+    start_time = time.perf_counter()
+    logger.info("─" * 56)
+    logger.info("  Startup — EcomAgent Initialization")
+    logger.info("─" * 56)
 
     # 1. LLM with fallback
     llm = ChatDeepSeek(
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
-    fallback_llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-5-nano-2025-08-07"))
+    fallback_llm = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     llm_with_fallback = llm.with_fallbacks([fallback_llm])
+    logger.info("  [ OK ] DeepSeek LLM loaded (%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
+    logger.info("  [ OK ] OpenAI fallback LLM loaded (%s)", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
 
     # 2. Vectorstore (Supabase PGVector)
     postgres_uri = os.getenv("POSTGRES_URI")
@@ -97,13 +103,13 @@ async def lifespan(app: FastAPI):
                 connection=postgres_uri,
                 use_jsonb=True,
             )
-            logger.info("Vectorstore connected to Supabase.")
+            logger.info("  [ OK ] Vectorstore (Supabase/PGVector) connected")
         except Exception as e:
             vectorstore = None
-            logger.warning("Vectorstore connection failed: %s – vectorstore disabled.", e)
+            logger.warning("  [FAIL] Vectorstore connection failed: %s", e)
     else:
         vectorstore = None
-        logger.warning("POSTGRES_URI not set – vectorstore disabled.")
+        logger.warning("  [SKIP] POSTGRES_URI not set – vectorstore disabled")
 
     # 3. Tools
     tools = [
@@ -116,6 +122,8 @@ async def lifespan(app: FastAPI):
         search_knowledge_base,
     ]
 
+    logger.info("  [ OK ] %d tools registered", len(tools))
+
     # 4. Build agent graph with shared checkpointer
     postgres_uri = os.getenv("POSTGRES_URI")
     checkpointer = None
@@ -123,29 +131,36 @@ async def lifespan(app: FastAPI):
         try:
             checkpointer = AsyncPostgresSaver.from_conn_string(postgres_uri)
             await checkpointer.setup()
-            logger.info("AsyncPostgresSaver connected to Supabase.")
+            logger.info("  [ OK ] AsyncPostgresSaver checkpointer ready")
         except Exception as e:
             checkpointer = None
-            logger.warning("AsyncPostgresSaver connection failed: %s – using in-memory checkpointer.", e)
+            logger.warning("  [SKIP] Checkpointer connection failed: %s - using in-memory", e)
 
     agent = EcomAgent(llm=llm_with_fallback, tools=tools, checkpointer=checkpointer)
     graph = agent.build_graph
+
+    logger.info("  [ OK ] Agent graph compiled")
 
     # Store on app.state so endpoints can access them
     app.state.graph = graph
     app.state.vectorstore = vectorstore
     app.state.checkpointer = checkpointer
 
-    logger.info("Startup complete ✓")
+    elapsed = time.perf_counter() - start_time
+    logger.info("─" * 56)
+    logger.info("  Startup complete (%.2fs)", elapsed)
+    logger.info("─" * 56)
     yield
     # Shutdown cleanup
-    logger.info("Shutting down…")
+    logger.info("─" * 56)
+    logger.info("  Shutdown")
+    logger.info("─" * 56)
     if checkpointer is not None:
         try:
             await checkpointer.conn.close()
-            logger.info("AsyncPostgresSaver connection closed.")
+            logger.info("  [ OK ] AsyncPostgresSaver connection closed")
         except Exception as e:
-            logger.warning("Error closing checkpointer: %s", e)
+            logger.warning("  [FAIL] Error closing checkpointer: %s", e)
 
 
 # ── FastAPI app ───────────────────────────────────────────────────────

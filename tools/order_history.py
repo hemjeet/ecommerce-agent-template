@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from typing import Optional, Dict, Any
 from cachetools import TTLCache
 import threading
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class OrderHistoryResponse(BaseModel):
         "Fetch orders for a customer using customer_id. "
         "Use this when the customer asks about order history, past orders, or all orders. "
     ))
+@retry_on_db_error()
 def get_order_history(customer_id: str) -> str:
     if not customer_id or not customer_id.strip():
         return OrderHistoryResponse(error='customer_id is required').model_dump_json()

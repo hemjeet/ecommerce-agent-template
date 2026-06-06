@@ -4,6 +4,7 @@ from typing import Optional
 from langchain_core.tools import tool
 from data import Order, SessionLocal
 from pydantic import BaseModel
+from .retry import retry_on_db_error
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,7 @@ class EligibilityResponse(BaseModel):
         "Use this before creating or processing any refund."
     )
 )
+@retry_on_db_error()
 def check_refund_eligibility(order_id: str) -> str:
     if not order_id or not order_id.strip():
         return EligibilityResponse(
