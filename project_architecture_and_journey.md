@@ -50,8 +50,8 @@ To ensure the application could handle high traffic gracefully, we encountered a
 **Solution:** We implemented **time-based UI throttling** in the Gradio generator. We aggregate the incoming tokens and yield to the frontend at a maximum of 20 frames per second (every 0.05 seconds). This completely eliminated the lag while maintaining the smooth typing effect.
 
 ### Challenge 2: Blocking the Async Event Loop
-**Issue:** LangGraph's `graph.invoke` and `graph.stream` are synchronous operations. Running them directly in FastAPI endpoints blocked the async event loop, meaning one slow LLM call would freeze the entire server for all other users.
-**Solution:** We offloaded the synchronous LangGraph executions to background threads using `asyncio.to_thread` for standard calls, and a dedicated `ThreadPoolExecutor` bridged with an `asyncio.Queue` for the streaming endpoint. This allows FastAPI to handle hundreds of concurrent connections asynchronously.
+**Issue:** LangGraph's default `graph.invoke` and `graph.stream` are synchronous. Running them directly in FastAPI endpoints blocked the async event loop, meaning one slow LLM call would freeze the entire server. Initially, we used background threads (`asyncio.to_thread` and `ThreadPoolExecutor`) to work around this.
+**Solution:** Once we migrated to `AsyncPostgresSaver`, we fully refactored the application to use LangGraph's native asynchronous methods (`graph.ainvoke` and `graph.astream`). This natively integrates with FastAPI's event loop, completely eliminating the clunky thread pools and queue logic while dramatically improving concurrent throughput.
 
 ### Challenge 3: Memory Leaks in Checkpointing
 **Issue:** Initially, the graph used `MemorySaver()`. At 10,000 requests/day, storing every conversation thread in RAM would inevitably cause an Out of Memory (OOM) crash.
@@ -64,6 +64,10 @@ To ensure the application could handle high traffic gracefully, we encountered a
 ### Challenge 5: Rate Limiting
 **Issue:** To protect the LLM API budget from abuse or DDoS attacks.
 **Solution:** We implemented `slowapi`, setting a reasonable limit of `20 requests/minute` per IP address across all chat endpoints.
+
+### Challenge 6: Database Connection Resiliency
+**Issue:** When dealing with external databases, temporary network hiccups or query timeouts can cause tools to fail and disrupt the user experience.
+**Solution:** We implemented a custom `@retry_on_db_error()` decorator implementing exponential backoff. This securely wraps all our database tools, allowing them to automatically retry transient `OperationalError` or `TimeoutError` exceptions before ultimately failing.
 
 ---
 
