@@ -6,7 +6,6 @@ import sys
 import asyncio
 import time
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,6 +19,8 @@ from langchain_postgres import PGVector
 from langchain_core.messages import HumanMessage, AIMessageChunk
 from langgraph.types import Command
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+from langgraph.checkpoint.postgres import dict_row
+from psycopg import AsyncConnection
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -109,7 +110,7 @@ async def lifespan(app: FastAPI):
             logger.warning("  [FAIL] Vectorstore connection failed: %s", e)
     else:
         vectorstore = None
-        logger.warning("  [SKIP] POSTGRES_URI not set – vectorstore disabled")
+        logger.warning("  [SKIP] POSTGRES_URI not set - vectorstore disabled")
 
     # 3. Tools
     tools = [
@@ -129,7 +130,13 @@ async def lifespan(app: FastAPI):
     checkpointer = None
     if postgres_uri:
         try:
-            checkpointer = AsyncPostgresSaver.from_conn_string(postgres_uri)
+            conn = await AsyncConnection.connect(
+                postgres_uri,
+                autocommit=True,
+                prepare_threshold=0,
+                row_factory=dict_row,
+            )
+            checkpointer = AsyncPostgresSaver(conn=conn)
             await checkpointer.setup()
             logger.info("  [ OK ] AsyncPostgresSaver checkpointer ready")
         except Exception as e:
@@ -197,9 +204,9 @@ def _get_config(thread_id: str, vectorstore):
     return {"configurable": {"thread_id": thread_id, "vectorstore": vectorstore}}
 
 
-def _check_interrupt(graph, config):
+async def _check_interrupt(graph, config):
     """Return (requires_approval, question) if the graph is paused."""
-    state = graph.get_state(config)
+    state = await graph.aget_state(config)
     if state.tasks and getattr(state.tasks[0], "interrupts", None):
         interrupt_value = state.tasks[0].interrupts[0].value
         question = interrupt_value.get("question", "Approval required (yes/no)")
@@ -226,8 +233,7 @@ async def chat(request: Request, req: ChatRequest):
     config = _get_config(thread_id, vectorstore)
 
     try:
-        result = await asyncio.to_thread(
-            graph.invoke,
+        result = await graph.ainvoke(
             {"messages": [HumanMessage(content=req.message)]},
             config,
         )
@@ -235,7 +241,7 @@ async def chat(request: Request, req: ChatRequest):
         logger.error("Graph invoke failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    requires_approval, question = _check_interrupt(graph, config)
+    requires_approval, question = await _check_interrupt(graph, config)
     if requires_approval:
         return ChatResponse(
             response="",
@@ -260,62 +266,27 @@ async def chat_stream(request: Request, req: ChatRequest):
     config = _get_config(thread_id, vectorstore)
 
     async def event_stream():
-        loop = asyncio.get_running_loop()
-        queue: asyncio.Queue = asyncio.Queue()
-
-        def _run_graph():
-            try:
-                for msg, metadata in graph.stream(
-                    {"messages": [HumanMessage(content=req.message)]},
-                    config,
-                    stream_mode="messages",
-                ):
-                    loop.call_soon_threadsafe(
-                        queue.put_nowait,
-                        ("message", msg, metadata),
-                    )
-
-                requires_approval, question = _check_interrupt(graph, config)
-                loop.call_soon_threadsafe(
-                    queue.put_nowait,
-                    ("done", requires_approval, question, thread_id),
-                )
-            except Exception as e:
-                logger.error("Stream error: %s", e)
-                loop.call_soon_threadsafe(
-                    queue.put_nowait,
-                    ("error", str(e)),
-                )
-
-        executor = ThreadPoolExecutor(max_workers=1)
-        loop.run_in_executor(executor, _run_graph)
-
         try:
-            while True:
-                item = await queue.get()
+            async for msg, metadata in graph.astream(
+                {"messages": [HumanMessage(content=req.message)]},
+                config,
+                stream_mode="messages",
+            ):
+                if (
+                    isinstance(msg, AIMessageChunk)
+                    and msg.content
+                    and metadata.get("langgraph_node") == "llm_call"
+                ):
+                    yield f"data: {json.dumps(msg.content)}\n\n"
 
-                if item[0] == "message":
-                    _tag, msg, metadata = item
-                    if (
-                        isinstance(msg, AIMessageChunk)
-                        and msg.content
-                        and metadata["langgraph_node"] == "llm_call"
-                    ):
-                        yield f"data: {json.dumps(msg.content)}\n\n"
-
-                elif item[0] == "done":
-                    _tag, requires_approval, question, tid = item
-                    if requires_approval:
-                        yield f"event: approval_required\ndata: {question}\n\n"
-                    yield f"event: metadata\ndata: {tid}\n\n"
-                    yield "event: done\ndata: [DONE]\n\n"
-                    break
-
-                elif item[0] == "error":
-                    yield f"event: error\ndata: {item[1]}\n\n"
-                    break
-        finally:
-            executor.shutdown(wait=False)
+            requires_approval, question = await _check_interrupt(graph, config)
+            if requires_approval:
+                yield f"event: approval_required\ndata: {question}\n\n"
+            yield f"event: metadata\ndata: {thread_id}\n\n"
+            yield "event: done\ndata: [DONE]\n\n"
+        except Exception as e:
+            logger.error("Stream error: %s", e)
+            yield f"event: error\ndata: {str(e)}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -329,14 +300,12 @@ async def chat_resume(request: Request, req: ResumeRequest):
     config = _get_config(req.thread_id, vectorstore)
 
     try:
-        result = await asyncio.to_thread(
-            graph.invoke, Command(resume=req.reply), config
-        )
+        result = await graph.ainvoke(Command(resume=req.reply), config)
     except Exception as e:
         logger.error("Resume failed: %s", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-    requires_approval, question = _check_interrupt(graph, config)
+    requires_approval, question = await _check_interrupt(graph, config)
     if requires_approval:
         return ChatResponse(
             response="",
