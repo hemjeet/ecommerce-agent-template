@@ -2,13 +2,14 @@ import json
 import logging
 from langchain_core.messages import HumanMessage, ToolMessage, SystemMessage, AIMessage
 from langchain_core.messages import trim_messages, filter_messages
+from langchain_core.runnables.config import RunnableConfig
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import StateGraph, START, END
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.types import interrupt, Command, RetryPolicy
 import openai
 import httpx
-
+import asyncio
 from .prompts import SYSTEM_PROMPT
 from .state import EcomAgentState
 import tiktoken
@@ -42,7 +43,7 @@ class EcomAgent:
         self.build_graph = self._graph()
 
     
-    def _llm_call(self, state: EcomAgentState):
+    async def _llm_call(self, state: EcomAgentState, config: RunnableConfig):
         messages = state['messages']
         logger.info("Calling LLM with %d messages (before trim)", len(messages))
         
@@ -63,10 +64,11 @@ class EcomAgent:
             trimmed = messages[-10:]
         
         logger.info("Trimmed to %d messages (from %d)", len(trimmed), len(messages))
-        
-        response = self.llm.invoke([
+
+
+        response = await self.llm.ainvoke([
             SystemMessage(content=SYSTEM_PROMPT), *trimmed
-        ])
+        ], config)
         logger.info("LLM responded with tool_calls=%s", 
                      [tc['name'] for tc in getattr(response, 'tool_calls', []) or []])
         return {'messages': [response]}

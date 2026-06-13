@@ -57,7 +57,7 @@ ShopAssist is an intelligent e-commerce customer support agent powered by LangGr
 
 2.  **Start the Server:**
     ```bash
-    uvicorn app:app --host 0.0.0.0 --port 8000
+    python app.py
     ```
 
 3.  **Access the UI:**

@@ -11,8 +11,8 @@ DATABASE_URL = os.getenv("POSTGRES_URI", "postgresql://postgres:postgres@localho
 
 engine = create_engine(
     DATABASE_URL,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
+    max_overflow=int(os.getenv("DB_MAX_OVERFLOW", "5")),
     pool_recycle=3600,
     pool_pre_ping=True,
 )

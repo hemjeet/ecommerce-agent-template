@@ -11,9 +11,12 @@ python-dotenv
 sqlalchemy
 psycopg2-binary
 psycopg[binary]
+psycopg-pool
 tiktoken
 httpx
 gradio
 pydantic
 slowapi
 cachetools
+uvloop; sys_platform != "win32"
+
