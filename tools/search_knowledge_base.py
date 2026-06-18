@@ -40,7 +40,6 @@ async def search_knowledge_base(query: str, config: RunnableConfig) -> str:
     t_start = time.perf_counter()
 
     _vectorstore = config['configurable'].get('vectorstore')
-    _semantic_cache = config['configurable'].get('semantic_cache')
 
     # ── 1. Exact-match cache (fast path, no embedding cost) ────────
     cache_key = query.strip().lower()
@@ -49,44 +48,7 @@ async def search_knowledge_base(query: str, config: RunnableConfig) -> str:
             logger.info("Exact-match cache hit for: %s (%.3fs)", query, time.perf_counter() - t_start)
             return _kb_cache[cache_key]
 
-    # ── 2. Embed once — reuse for semantic cache + vectorstore ─────
-    query_embedding = None
-    embeddings_model = None
-    if _semantic_cache is not None:
-        embeddings_model = _semantic_cache.embeddings
-    elif _vectorstore is not None:
-        embeddings_model = _vectorstore.embeddings
-
-    if embeddings_model is not None:
-        try:
-            t_embed = time.perf_counter()
-            query_embedding = await embeddings_model.aembed_query(query)
-            logger.info(
-                "KB embed (single call): %.3fs, dim=%d",
-                time.perf_counter() - t_embed,
-                len(query_embedding),
-            )
-        except Exception as e:
-            logger.warning("Embedding failed (falling through): %s", e)
-
-    # ── 3. Semantic cache lookup (uses pre-computed embedding) ─────
-    if _semantic_cache is not None and query_embedding is not None:
-        try:
-            t_cache = time.perf_counter()
-            hit = await asyncio.to_thread(
-                _semantic_cache.get, query, query_embedding
-            )
-            logger.info("Semantic cache lookup: %.3fs", time.perf_counter() - t_cache)
-            if hit is not None:
-                logger.info(
-                    "Semantic cache HIT for query=%r (sim=%.4f, total=%.3fs)",
-                    query, hit.similarity, time.perf_counter() - t_start,
-                )
-                return hit.response
-        except Exception as e:
-            logger.warning("Semantic cache lookup error (falling through): %s", e)
-
-    # ── 4. Cache miss — search vectorstore ─────────────────────────
+    # ── 2. Vectorstore search ─────────────────────────────────────
     try:
         if not _vectorstore:
             return KnowledgeBaseSearchResponse(
@@ -94,14 +56,9 @@ async def search_knowledge_base(query: str, config: RunnableConfig) -> str:
             ).model_dump_json()
 
         t_vs = time.perf_counter()
-        if query_embedding is not None:
-            docs = await asyncio.to_thread(
-                _vectorstore.similarity_search_by_vector, query_embedding, k=3
-            )
-        else:
-            docs = await asyncio.to_thread(
-                _vectorstore.similarity_search, query, k=3
-            )
+        docs = await asyncio.to_thread(
+            _vectorstore.similarity_search, query, k=3
+        )
         logger.info(
             "Vectorstore search: %.3fs, docs=%d",
             time.perf_counter() - t_vs, len(docs),
@@ -121,19 +78,9 @@ async def search_knowledge_base(query: str, config: RunnableConfig) -> str:
             cached=False,
         ).model_dump_json()
 
-        # ── 5. Store in both caches (reuse embedding) ─────────────
+        # Store in exact-match cache
         with _kb_cache_lock:
             _kb_cache[cache_key] = result
-
-        if _semantic_cache is not None and query_embedding is not None:
-            try:
-                t_put = time.perf_counter()
-                await asyncio.to_thread(
-                    _semantic_cache.put, query, result, query_embedding
-                )
-                logger.info("Semantic cache PUT: %.3fs", time.perf_counter() - t_put)
-            except Exception as e:
-                logger.warning("Semantic cache store error (non-fatal): %s", e)
 
         logger.info(
             "KB search total: %.3fs (query=%r)",
@@ -146,3 +93,4 @@ async def search_knowledge_base(query: str, config: RunnableConfig) -> str:
         return KnowledgeBaseSearchResponse(
             error=str(e),
         ).model_dump_json()
+

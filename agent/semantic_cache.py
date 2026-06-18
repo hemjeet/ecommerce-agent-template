@@ -55,7 +55,7 @@ class SemanticCache:
     _CREATE_TABLE_SQL = text("""
         CREATE TABLE IF NOT EXISTS semantic_cache (
             id          SERIAL PRIMARY KEY,
-            query_text  TEXT NOT NULL,
+            query_text  TEXT NOT NULL UNIQUE,
             embedding   vector(1536) NOT NULL,
             response    TEXT NOT NULL,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -84,7 +84,12 @@ class SemanticCache:
 
     _INSERT_SQL = text("""
         INSERT INTO semantic_cache (query_text, embedding, response, expires_at)
-        VALUES (:query_text, CAST(:embedding AS vector), :response, :expires_at);
+        VALUES (:query_text, CAST(:embedding AS vector), :response, :expires_at)
+        ON CONFLICT (query_text) DO UPDATE SET
+            embedding  = EXCLUDED.embedding,
+            response   = EXCLUDED.response,
+            expires_at = GREATEST(semantic_cache.expires_at, EXCLUDED.expires_at),
+            created_at = NOW();
     """)
 
     _DELETE_EXPIRED_SQL = text("""
@@ -105,7 +110,7 @@ class SemanticCache:
         self,
         embeddings,
         session_factory,
-        threshold: float = 0.92,
+        threshold: float = 0.85,
         ttl: int = 600,
     ):
         self.embeddings = embeddings
@@ -127,6 +132,25 @@ class SemanticCache:
             db.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
             db.execute(self._CREATE_TABLE_SQL)
             db.commit()
+
+            # ── Migration: ensure UNIQUE constraint on query_text ────
+            # Deduplicate existing rows first (keep the newest per query_text),
+            # then create the unique index if it doesn't already exist.
+            try:
+                db.execute(text("""
+                    DELETE FROM semantic_cache a
+                    USING semantic_cache b
+                    WHERE a.id < b.id
+                      AND a.query_text = b.query_text;
+                """))
+                db.execute(text("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_semantic_cache_query_text
+                    ON semantic_cache (query_text);
+                """))
+                db.commit()
+            except Exception:
+                db.rollback()
+                logger.debug("query_text unique index already exists or migration skipped")
 
             # IVFFlat index needs at least some rows to build; CREATE INDEX
             # IF NOT EXISTS is safe even on an empty table with lists=10.
@@ -204,7 +228,13 @@ class SemanticCache:
         finally:
             db.close()
 
-    def put(self, query: str, response: str, embedding: Optional[list[float]] = None) -> None:
+    def put(
+        self,
+        query: str,
+        response: str,
+        embedding: Optional[list[float]] = None,
+        permanent: bool = False,
+    ) -> None:
         """Store a query-response pair in the cache.
 
         Parameters
@@ -213,14 +243,21 @@ class SemanticCache:
             Pre-computed embedding vector. When supplied the method skips
             the internal ``_embed()`` call, saving a round-trip to the
             embeddings API.
+        permanent : bool, default False
+            If True the entry never expires. Used for stable content such
+            as knowledge-base policy lookups.
         """
         query_embedding = embedding or self._embed(query)
         if query_embedding is None:
             return
 
         embedding_str = self._to_pgvector_literal(query_embedding)
-        expires_at = datetime.now(timezone.utc).timestamp() + self.ttl
-        expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+
+        if permanent:
+            expires_dt = datetime(9999, 12, 31, tzinfo=timezone.utc)
+        else:
+            expires_at = datetime.now(timezone.utc).timestamp() + self.ttl
+            expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc)
 
         db = self.session_factory()
         try:
@@ -234,7 +271,8 @@ class SemanticCache:
                 },
             )
             db.commit()
-            logger.info("Semantic cache PUT for query=%r (ttl=%ds)", query, self.ttl)
+            label = "permanent" if permanent else f"ttl={self.ttl}s"
+            logger.info("Semantic cache PUT for query=%r (%s)", query, label)
         except Exception as e:
             db.rollback()
             logger.error("Semantic cache store failed: %s", e)

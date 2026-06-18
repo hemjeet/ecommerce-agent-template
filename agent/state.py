@@ -5,12 +5,13 @@ from langgraph.graph.message import add_messages
 
 class EcomAgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+    iteration_count: int
     refund_elligible: Optional[bool]
     refund_amount: Optional[float]
     requires_approval: Optional[bool]
-    refund_status : Optional[str]
+    refund_status: Optional[str]
     order_id: Optional[str]
-    user_reply : Optional[str]
+    user_reply: Optional[str]
 
     
     

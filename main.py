@@ -34,7 +34,10 @@ logging.getLogger().handlers[1].setLevel(logging.WARNING)
 def main():
     load_dotenv()
     # Initialize LLM and Tools
-    llm = ChatDeepSeek(model="deepseek-v4-flash", api_key=os.getenv("DEEPSEEK_API_KEY"))
+    llm = ChatDeepSeek(
+        model="deepseek-v4-flash", 
+        api_key=os.getenv("DEEPSEEK_API_KEY")
+    )
     
     postgres_uri = os.getenv("POSTGRES_URI")
     if postgres_uri:
