@@ -107,7 +107,6 @@ class EcomAgent:
 
     async def _llm_call(self, state: EcomAgentState, config: RunnableConfig):
         messages = state['messages']
-        
         if messages and isinstance(messages[-1], HumanMessage):
             iteration_count = 1
         else:

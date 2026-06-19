@@ -23,6 +23,7 @@ from psycopg_pool import AsyncConnectionPool
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from slowapi.middleware import SlowAPIMiddleware
+from langchain_google_genai import ChatGoogleGenerativeAI
 from slowapi.errors import RateLimitExceeded
 
 from agent import EcomAgent
@@ -65,6 +66,7 @@ def _build_llm():
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
+    
     fallback = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     llm = primary.with_fallbacks([fallback])
     logger.info("  [ OK ] DeepSeek LLM loaded (%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
@@ -351,8 +353,12 @@ async def chat(request: Request, req: ChatRequest):
     if requires_approval:
         return ChatResponse(response="", thread_id=thread_id, requires_approval=True, approval_question=question)
 
+    final_content = result["messages"][-1].content
+    if isinstance(final_content, list):
+        final_content = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in final_content])
+
     logger.info("TIMING thread=%s total=%.2fs", thread_id[:8], time.perf_counter() - t0)
-    return ChatResponse(response=result["messages"][-1].content, thread_id=thread_id)
+    return ChatResponse(response=final_content, thread_id=thread_id)
 
 
 @app.post("/chat/stream")
@@ -374,7 +380,11 @@ async def chat_stream(request: Request, req: ChatRequest):
                         and msg.content
                         and metadata.get("langgraph_node") == "llm_call"
                     ):
-                        yield f"data: {json.dumps(msg.content)}\n\n"
+                        content_str = msg.content
+                        if isinstance(content_str, list):
+                            content_str = "".join([c.get("text", "") if isinstance(c, dict) else str(c) for c in content_str])
+                        if content_str:
+                            yield f"data: {json.dumps(content_str)}\n\n"
 
                 requires_approval, question = await _check_interrupt(graph, config)
                 if requires_approval:
