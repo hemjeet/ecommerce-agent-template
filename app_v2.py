@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, AIMessageChunk, AIMessage
 from langgraph.types import Command
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -66,7 +67,11 @@ def _build_llm():
         model=os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         api_key=os.getenv("DEEPSEEK_API_KEY"),
     )
-    
+
+    # primary = ChatGroq(
+    #     model = 'qwen/qwen3.6-27b',
+    # )
+
     fallback = ChatOpenAI(model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
     llm = primary.with_fallbacks([fallback])
     logger.info("  [ OK ] DeepSeek LLM loaded (%s)", os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash"))
