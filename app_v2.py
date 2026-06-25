@@ -27,9 +27,10 @@ from slowapi.middleware import SlowAPIMiddleware
 from langchain_google_genai import ChatGoogleGenerativeAI
 from slowapi.errors import RateLimitExceeded
 
+from langchain_core.globals import set_llm_cache
+from langchain_redis import RedisSemanticCache
+
 from agent import EcomAgent
-from agent.semantic_cache import SemanticCache
-from data import SessionLocal
 from tools.order_history import get_order_history
 from tools.order_tools import get_order_details
 from tools.refund_eligibility import check_refund_eligibility
@@ -81,6 +82,7 @@ def _build_llm():
 
 # ── Lifespan init helpers ──────────────────────────────────────────────
 def _init_vectorstore(postgres_uri: str, embeddings: OpenAIEmbeddings):
+    '''Initialize the vectorstore'''
     from langchain_postgres import PGVector
 
     try:
@@ -97,23 +99,27 @@ def _init_vectorstore(postgres_uri: str, embeddings: OpenAIEmbeddings):
         return None
 
 
-def _init_semantic_cache(postgres_uri: str, embeddings: OpenAIEmbeddings):
+def _init_redis_cache(embeddings: OpenAIEmbeddings):
+    redis_url = os.getenv("REDIS_URL")
+    if not redis_url:
+        logger.warning("  [SKIP] Redis cache disabled (no REDIS_URL)")
+        return None
     try:
-        cache = SemanticCache(
+        cache = RedisSemanticCache(
+            redis_url=redis_url,
             embeddings=embeddings,
-            session_factory=SessionLocal,
-            threshold=float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92")),
+            distance_threshold=float(os.getenv("REDIS_CACHE_THRESHOLD", "0.15")),
             ttl=int(os.getenv("SEMANTIC_CACHE_TTL", "600")),
         )
-        cache.setup()
-        cache.cleanup_expired()
+        set_llm_cache(cache)
         logger.info(
-            "  [ OK ] Semantic cache ready (threshold=%.2f, ttl=%ds)",
-            cache.threshold, cache.ttl,
+            "  [ OK ] Redis semantic cache ready (threshold=%.2f, ttl=%s)",
+            cache.cache.distance_threshold,
+            cache.cache.ttl,
         )
         return cache
     except Exception as e:
-        logger.warning("  [FAIL] Semantic cache init failed: %s - disabled", e)
+        logger.warning("  [FAIL] Redis cache init failed: %s - disabled", e)
         return None
 
 
@@ -189,10 +195,8 @@ async def lifespan(app: FastAPI):
     if not postgres_uri:
         logger.warning("  [SKIP] POSTGRES_URI not set - vectorstore disabled")
 
-    # 3. Semantic cache
-    semantic_cache = _init_semantic_cache(postgres_uri, embeddings) if postgres_uri else None
-    if not postgres_uri:
-        logger.warning("  [SKIP] Semantic cache disabled (no POSTGRES_URI)")
+    # 3. Redis semantic cache
+    redis_cache = _init_redis_cache(embeddings)
 
     # 4. Tools
     tools = [
@@ -218,7 +222,7 @@ async def lifespan(app: FastAPI):
     app.state.graph = graph
     app.state.vectorstore = vectorstore
     app.state.checkpointer_pool = checkpointer_pool
-    app.state.semantic_cache = semantic_cache
+    app.state.redis_cache = redis_cache
 
     elapsed = time.perf_counter() - t0
     logger.info("─" * 56)
@@ -230,12 +234,6 @@ async def lifespan(app: FastAPI):
     logger.info("─" * 56)
     logger.info("  Shutdown")
     logger.info("─" * 56)
-    if semantic_cache:
-        try:
-            deleted = semantic_cache.cleanup_expired()
-            logger.info("  [ OK ] Semantic cache: cleaned %d expired entries", deleted)
-        except Exception as e:
-            logger.warning("  [FAIL] Semantic cache cleanup error: %s", e)
     if checkpointer_pool:
         try:
             await checkpointer_pool.close()
@@ -283,11 +281,10 @@ async def pooled_checkpointer(pool):
         yield AsyncPostgresSaver(conn=conn)
 
 
-def _get_config(thread_id: str, vectorstore, saver=None, semantic_cache=None):
+def _get_config(thread_id: str, vectorstore, saver=None):
     cfg = {"configurable": {
         "thread_id": thread_id,
         "vectorstore": vectorstore,
-        "semantic_cache": semantic_cache,
     }}
     if saver is not None:
         cfg["configurable"]["checkpointer"] = saver
@@ -295,13 +292,12 @@ def _get_config(thread_id: str, vectorstore, saver=None, semantic_cache=None):
 
 
 def _get_request_context(req_thread_id: str | None):
-    """Return (thread_id, graph, vectorstore, pool, semantic_cache) from app.state."""
+    """Return (thread_id, graph, vectorstore, pool) from app.state."""
     return (
         req_thread_id or str(uuid.uuid4()),
         app.state.graph,
         app.state.vectorstore,
         app.state.checkpointer_pool,
-        app.state.semantic_cache,
     )
 
 
@@ -325,23 +321,27 @@ async def health():
 
 @app.get("/cache/stats")
 async def cache_stats():
-    cache = app.state.semantic_cache
+    cache = app.state.redis_cache
     if cache is None:
-        return JSONResponse(status_code=503, content={"detail": "Semantic cache is not enabled."})
-    return cache.stats()
+        return JSONResponse(status_code=503, content={"detail": "Redis cache is not enabled."})
+    return {
+        "backend": "redis",
+        "distance_threshold": cache.cache.distance_threshold,
+        "ttl_seconds": cache.cache.ttl,
+    }
 
 
 @app.post("/chat", response_model=ChatResponse)
 @limiter.limit(os.getenv("RATE_LIMIT"))
 async def chat(request: Request, req: ChatRequest):
-    thread_id, graph, vectorstore, pool, semantic_cache = _get_request_context(req.thread_id)
+    thread_id, graph, vectorstore, pool = _get_request_context(req.thread_id)
 
     t0 = time.perf_counter()
     async with pooled_checkpointer(pool) as saver:
         t_conn = time.perf_counter()
         logger.info("TIMING thread=%s conn_acquire=%.2fs", thread_id[:8], t_conn - t0)
 
-        config = _get_config(thread_id, vectorstore, saver, semantic_cache)
+        config = _get_config(thread_id, vectorstore, saver)
         try:
             t_invoke = time.perf_counter()
             result = await graph.ainvoke(
@@ -369,11 +369,11 @@ async def chat(request: Request, req: ChatRequest):
 @app.post("/chat/stream")
 @limiter.limit(os.getenv("RATE_LIMIT"))
 async def chat_stream(request: Request, req: ChatRequest):
-    thread_id, graph, vectorstore, pool, semantic_cache = _get_request_context(req.thread_id)
+    thread_id, graph, vectorstore, pool = _get_request_context(req.thread_id)
 
     async def event_stream():
         async with pooled_checkpointer(pool) as saver:
-            config = _get_config(thread_id, vectorstore, saver, semantic_cache)
+            config = _get_config(thread_id, vectorstore, saver)
             try:
                 async for msg, metadata in graph.astream(
                     {"messages": [HumanMessage(content=req.message)]},
@@ -410,14 +410,14 @@ async def chat_stream(request: Request, req: ChatRequest):
 @app.post("/chat/resume", response_model=ChatResponse)
 @limiter.limit(os.getenv("RATE_LIMIT"))
 async def chat_resume(request: Request, req: ResumeRequest):
-    thread_id, graph, vectorstore, pool, semantic_cache = _get_request_context(req.thread_id)
+    thread_id, graph, vectorstore, pool = _get_request_context(req.thread_id)
 
     t0 = time.perf_counter()
     async with pooled_checkpointer(pool) as saver:
         t_conn = time.perf_counter()
         logger.info("TIMING thread=%s conn_acquire=%.2fs", thread_id[:8], t_conn - t0)
 
-        config = _get_config(thread_id, vectorstore, saver, semantic_cache)
+        config = _get_config(thread_id, vectorstore, saver)
         try:
             result = await graph.ainvoke(Command(resume=req.reply), config)
         except Exception as e:
