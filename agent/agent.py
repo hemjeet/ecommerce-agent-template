@@ -1,5 +1,4 @@
 import os
-import asyncio
 import json
 import logging
 from langchain_core.messages import (
@@ -118,36 +117,6 @@ class EcomAgent:
         if force_stop:
             return force_stop
 
-        # ── Semantic cache: find last human message for cache key ─────
-        last_human_msg = None
-        for msg in reversed(messages):
-            if isinstance(msg, HumanMessage):
-                last_human_msg = msg
-                break
-
-        semantic_cache = config.get("configurable", {}).get("semantic_cache")
-
-        # ── Semantic cache check (skip LLM on hit, first iteration only)
-        if (
-            semantic_cache
-            and iteration_count == 1
-            and last_human_msg
-        ):
-            cache_result = await asyncio.to_thread(semantic_cache.get, last_human_msg.content)
-            if cache_result:
-                logger.info(
-                    "CACHE HIT — skipping LLM call (sim=%.4f, query=%r)",
-                    cache_result.similarity,
-                    last_human_msg.content[:80],
-                )
-                cached_response = AIMessage(content=cache_result.response)
-                reset_updates = self._reset_if_new_conversation(messages)
-                return {
-                    'messages': [cached_response],
-                    'iteration_count': 1,
-                    **reset_updates,
-                }
-
         trimmed = self._trim_context(messages)
         reset_updates = self._reset_if_new_conversation(messages)
 
@@ -156,33 +125,6 @@ class EcomAgent:
         )
         logger.info("LLM tool_calls=%s",
                      [tc['name'] for tc in getattr(response, 'tool_calls', []) or []])
-
-        # ── Semantic cache store (only when search_knowledge_base was called)
-        if (
-            semantic_cache
-            and not getattr(response, 'tool_calls', None)
-            and last_human_msg
-        ):
-            # Only cache if the knowledge base tool was the ONLY tool used in THIS turn
-            kb_used = False
-            dynamic_tool_used = False
-            
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage):
-                    break
-                if getattr(msg, "name", None) == "search_knowledge_base":
-                    kb_used = True
-                elif getattr(msg, "name", None) is not None:
-                    dynamic_tool_used = True
-
-            if kb_used and not dynamic_tool_used:
-                try:
-                    # permanent=True for knowledge base answers
-                    await asyncio.to_thread(
-                        semantic_cache.put, last_human_msg.content, response.content, None, True
-                    )
-                except Exception as e:
-                    logger.warning("Semantic cache store failed: %s", e)
 
         return {'messages': [response], 'iteration_count': iteration_count, **reset_updates}
 

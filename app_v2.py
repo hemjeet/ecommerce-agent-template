@@ -28,8 +28,6 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from slowapi.errors import RateLimitExceeded
 
 from agent import EcomAgent
-from agent.semantic_cache import SemanticCache
-from data import SessionLocal
 from tools.order_history import get_order_history
 from tools.order_tools import get_order_details
 from tools.refund_eligibility import check_refund_eligibility
@@ -97,23 +95,24 @@ def _init_vectorstore(postgres_uri: str, embeddings: OpenAIEmbeddings):
         return None
 
 
-def _init_semantic_cache(postgres_uri: str, embeddings: OpenAIEmbeddings):
+def _init_semantic_cache(redis_url: str, embeddings: OpenAIEmbeddings):
+    from agent.semantic_cache import RedisSemanticCache
     try:
-        cache = SemanticCache(
+        cache = RedisSemanticCache(
+            redis_url=redis_url,
             embeddings=embeddings,
-            session_factory=SessionLocal,
-            threshold=float(os.getenv("SEMANTIC_CACHE_THRESHOLD", "0.92")),
+            threshold=float(os.getenv("REDIS_CACHE_THRESHOLD", "0.92")),
             ttl=int(os.getenv("SEMANTIC_CACHE_TTL", "600")),
         )
         cache.setup()
         cache.cleanup_expired()
         logger.info(
-            "  [ OK ] Semantic cache ready (threshold=%.2f, ttl=%ds)",
+            "  [ OK ] Redis semantic cache ready (threshold=%.2f, ttl=%ds)",
             cache.threshold, cache.ttl,
         )
         return cache
     except Exception as e:
-        logger.warning("  [FAIL] Semantic cache init failed: %s - disabled", e)
+        logger.warning("  [FAIL] Redis semantic cache init failed: %s - disabled", e)
         return None
 
 
@@ -190,9 +189,10 @@ async def lifespan(app: FastAPI):
         logger.warning("  [SKIP] POSTGRES_URI not set - vectorstore disabled")
 
     # 3. Semantic cache
-    semantic_cache = _init_semantic_cache(postgres_uri, embeddings) if postgres_uri else None
-    if not postgres_uri:
-        logger.warning("  [SKIP] Semantic cache disabled (no POSTGRES_URI)")
+    redis_url = os.getenv("REDIS_URL")
+    semantic_cache = _init_semantic_cache(redis_url, embeddings) if redis_url else None
+    if not redis_url:
+        logger.warning("  [SKIP] Semantic cache disabled (no REDIS_URL)")
 
     # 4. Tools
     tools = [
@@ -218,6 +218,7 @@ async def lifespan(app: FastAPI):
     app.state.graph = graph
     app.state.vectorstore = vectorstore
     app.state.checkpointer_pool = checkpointer_pool
+    app.state.semantic_cache = semantic_cache
     app.state.semantic_cache = semantic_cache
 
     elapsed = time.perf_counter() - t0
