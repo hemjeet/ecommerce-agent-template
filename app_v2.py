@@ -86,7 +86,6 @@ def _init_vectorstore(postgres_uri: str, embeddings: OpenAIEmbeddings):
     try:
         vs = PGVector(
             embeddings=embeddings,
-            collection_name="knowledge_base",
             connection=postgres_uri,
             use_jsonb=True,
         )

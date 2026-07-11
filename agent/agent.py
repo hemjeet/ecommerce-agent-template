@@ -156,6 +156,29 @@ class EcomAgent:
         )
         logger.info("LLM tool_calls=%s",
                      [tc['name'] for tc in getattr(response, 'tool_calls', []) or []])
+        logger.info("LLM response: type=%s, content_type=%s, content_len=%s, preview=%r",
+                     type(response).__name__,
+                     type(response.content).__name__,
+                     len(response.content) if isinstance(response.content, (str, list)) else '?',
+                     (response.content[:200] if isinstance(response.content, str) else str(response.content)[:200]))
+
+        # ── Guard: detect empty response (no content AND no tool calls) ──
+        response_content = response.content
+        if isinstance(response_content, list):
+            response_content = "".join(
+                c.get("text", "") if isinstance(c, dict) else str(c)
+                for c in response_content
+            )
+        if not response_content and not getattr(response, 'tool_calls', None):
+            logger.warning("LLM returned empty content with no tool calls — returning fallback")
+            return {
+                'messages': [AIMessage(
+                    content="I'm sorry, I wasn't able to process that. "
+                            "Could you please rephrase your question?"
+                )],
+                'iteration_count': iteration_count,
+                **self._reset_if_new_conversation(messages),
+            }
 
         # ── Semantic cache store (only when search_knowledge_base was called)
         if (
